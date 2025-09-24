@@ -54,7 +54,7 @@ TFT_eSprite teclado = TFT_eSprite(&tft);
 
 // -------------------- CATEGORIAS --------------------
 const int numCategorias = 4;
-String categorias[] = {"Celular", "Notebook", "TV", "Tablet"};
+String categorias[] = {"Computador", "Celular", "Bateria", "Pilha", "Outro"};
 Button catButtons[numCategorias];
 
 // ==================== FUNÇÃO AUXILIAR MULTILINHA ====================
@@ -95,7 +95,7 @@ void enviarParaAPI(String cpf, String categoria, int massa, String idLixeira) {
   json += "\"cpf\":\"" +cpf + "\",";
   json += "\"categoria\":\""  + categoria + "\",";
   json += "\"massa\":" + String(massa) + ",";
-  json += "\"localDescarte\":\"" + idLixeira + "\"";
+  json += "\"lixeiraDescarte\":\"" + idLixeira + "\"";
   json += "}";
 
   Serial.println(json);
@@ -352,7 +352,6 @@ void mostrarTelaCarregamento() {
     if (!dadosEnviados) {
       // Aqui você só precisa passar os parâmetros desejados:
       enviarParaAPI(cpfConfirmado, categoriaSelecionada, 150, idLixeira);
-);
       dadosEnviados = true;
     }
   } else {
