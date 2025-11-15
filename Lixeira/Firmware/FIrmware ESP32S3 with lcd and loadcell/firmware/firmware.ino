@@ -4,34 +4,27 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include "config.h"
-#include "HX711.h"
+#include "HX711.h" 
 
-// -------------------- CONFIGURAÇÃO DO TOUCH --------------------
+#define LOADCELL_DOUT_PIN 27
+#define LOADCELL_SCK_PIN 26
+#define CALIBRATION_FACTOR 420.0 
+int massaPesada = 0;
+
 XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
 
-// -------------------- CONFIGURAÇÃO DO DISPLAY --------------------
 TFT_eSPI tft = TFT_eSPI();
 #define SCREEN_W 320
 #define SCREEN_H 240
 
-// -------------------- CONFIGURAÇÃO DO LOADCELL --------------------
-#define DT_LOADCELL 3
-#define SCK_LOADCELL 46
-HX711 balanca;
+HX711 scale;
 
-void iniciarBalanca() {
-  balanca.begin(DT_LOADCELL, SCK_LOADCELL);
-  // Aqui você ajusta depois com sua calibração real
-  balanca.set_scale(2280.f);  // fator de calibração
-  balanca.tare();             // zera na inicialização
-}
-
-// -------------------- VARIÁVEIS --------------------
 String cpfDigitado = "";
 String cpfConfirmado = ""; 
 String categoriaSelecionada = "";
 
 bool dadosEnviados = false;
+bool pesoMedido = false; 
 
 enum Tela { TECLADO, CATEGORIA, CARREGANDO, MENSAGEM_FINAL, CPF_INVALIDO };
 Tela telaAtual = TECLADO;
@@ -39,7 +32,6 @@ unsigned long tempoEstado = 0;
 int passoCarregamento = 0;  
 bool primeiroDesenho = true;
 
-// -------------------- CORES & TAMANHO --------------------
 uint16_t COR_FUNDO_TELA   = tft.color565(29, 59, 28);
 uint16_t COR_BOTAO_BG     = TFT_BLUE;
 uint16_t COR_BOTAO_TEXT   = TFT_WHITE;
@@ -48,13 +40,11 @@ uint16_t COR_BOTAO_APAGAR_BG = TFT_RED;
 uint16_t COR_BOTAO_OK_BG     = TFT_GREEN;
 int TEXTO_SIZE = 3;
 
-// -------------------- TOUCH CALIBRADO --------------------
 #define TS_MINX 200
 #define TS_MAXX 3900
 #define TS_MINY 200
 #define TS_MAXY 3900
 
-// -------------------- BOTÕES --------------------
 struct Button {
   int x, y, w, h;
   String label;
@@ -65,37 +55,48 @@ struct Button {
 Button buttons[12];
 TFT_eSprite teclado = TFT_eSprite(&tft);
 
-// -------------------- CATEGORIAS --------------------
 const int numCategorias = 4;
-String categorias[] = {"Computador", "Celular", "Bateria", "Pilha", "Outro"};
+String categorias[] = {"Computador", "Celular", "Bateria", "Pilha"};
 Button catButtons[numCategorias];
 
-// ==================== FUNÇÃO AUXILIAR MULTILINHA ====================
 void drawMultilineString(String text, int x, int y, int maxWidth, int textSize, uint16_t color) {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(color, COR_FUNDO_TELA);
   tft.setTextSize(textSize);
 
   int start = 0;
+  int charsPerLine = maxWidth / (6 * textSize); 
+
   while (start < text.length()) {
-    int len = 0;
-    while (start + len < text.length() && len * 6 * textSize < maxWidth) len++;
-    String linha = text.substring(start, start+len);
+    int end = start + charsPerLine;
+    if (end > text.length()) end = text.length();
+    
+    int breakPoint = end;
+    if (end < text.length()) { 
+        int lastSpace = text.lastIndexOf(' ', end);
+        if (lastSpace > start) {
+            breakPoint = lastSpace;
+        }
+    } else {
+        breakPoint = text.length();
+    }
+    
+    String linha = text.substring(start, breakPoint);
     tft.drawString(linha, x, y);
     y += 8 * textSize;
-    start += len;
+    start = breakPoint;
+    if (text[start] == ' ') start++;
   }
 }
 
 void enviarParaAPI(String cpf, String categoria, int massa, String idLixeira) {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi nao conectado, tentando reconectar...");
     WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
+    unsigned long timeout = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - timeout < 10000) {
       delay(500);
-      Serial.print(".");
     }
-    Serial.println("WiFi conectado!");
+    if (WiFi.status() != WL_CONNECTED) return;
   }
 
   HTTPClient http;
@@ -103,7 +104,6 @@ void enviarParaAPI(String cpf, String categoria, int massa, String idLixeira) {
   http.begin(endpoint);
   http.addHeader("Content-Type", "application/json");
 
-  // Monta JSON
   String json = "{";
   json += "\"cpf\":\"" +cpf + "\",";
   json += "\"categoria\":\""  + categoria + "\",";
@@ -111,19 +111,16 @@ void enviarParaAPI(String cpf, String categoria, int massa, String idLixeira) {
   json += "\"lixeiraDescarte\":\"" + idLixeira + "\"";
   json += "}";
 
-  Serial.println(json);
-
   int httpCode = http.POST(json);
-  if (httpCode > 0) {
-    String response = http.getString();
-    Serial.println("POST OK: " + response);
-  } else {
-    Serial.println("Falha no POST");
-  }
   http.end();
 }
 
-// ==================== SETUP ====================
+void inicializarHX711() {
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale(CALIBRATION_FACTOR); 
+  scale.tare();
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -134,14 +131,17 @@ void setup() {
   tft.init();
   tft.setRotation(1);
   tft.fillScreen(COR_FUNDO_TELA);
+  
+  inicializarHX711();
+
+  // CPF é iniciado vazio
+  cpfDigitado = ""; 
 
   criarBotoes();
   desenharTeclado();
   atualizarCampoTexto();
-  iniciarBalanca();
 }
 
-// ==================== LOOP ====================
 void loop() {
   switch(telaAtual) {
     case TECLADO:
@@ -154,7 +154,7 @@ void loop() {
 
     case CPF_INVALIDO:
       if (millis() - tempoEstado >= 2000) {
-        cpfDigitado = "";
+        cpfDigitado = ""; 
         telaAtual = TECLADO;
         desenharTeclado();
         atualizarCampoTexto();
@@ -172,13 +172,12 @@ void loop() {
   }
 }
 
-// ==================== FUNÇÕES DO TECLADO ====================
 void processarTeclado() {
   if (!ts.touched()) return;
 
   TS_Point p = ts.getPoint();
-  int x = map(p.x, TS_MINX, TS_MAXX, 0, SCREEN_W);
-  int y = map(p.y, TS_MINY, TS_MAXY, 0, SCREEN_H);
+  int x = map(p.y, TS_MINY, TS_MAXY, 0, SCREEN_W); 
+  int y = map(p.x, TS_MINX, TS_MAXX, 0, SCREEN_H); 
 
   for (int i = 0; i < 12; i++) {
     if (x >= buttons[i].x && x <= buttons[i].x + buttons[i].w &&
@@ -204,33 +203,35 @@ void processarTeclado() {
   }
 }
 
-// ==================== CATEGORIAS ====================
 void mostrarTelaCategoria() {
-  tft.fillScreen(COR_FUNDO_TELA);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(TEXTO_SIZE);
-  tft.drawString("Selecione a categoria:", 10, 10);
+  if (primeiroDesenho) { 
+    tft.fillScreen(COR_FUNDO_TELA);
+    tft.setTextColor(TFT_WHITE);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextSize(TEXTO_SIZE);
+    tft.drawString("Selecione a categoria:", 10, 10);
 
-  int topMargin = 50;
-  int btnH = 40;
-  int btnW = SCREEN_W - 40;
+    int topMargin = 50;
+    int btnH = 40;
+    int btnW = SCREEN_W - 40;
 
-  for (int i = 0; i < numCategorias; i++) {
-    int y = topMargin + i*(btnH + 10);
-    catButtons[i] = {20, y, btnW, btnH, categorias[i], TFT_BLUE, TFT_WHITE, TFT_WHITE};
-    tft.fillRect(catButtons[i].x, catButtons[i].y, catButtons[i].w, catButtons[i].h, catButtons[i].colorBg);
-    tft.drawRect(catButtons[i].x, catButtons[i].y, catButtons[i].w, catButtons[i].h, catButtons[i].colorBorder);
-    tft.setTextDatum(MC_DATUM);
-    tft.drawString(catButtons[i].label, catButtons[i].x + btnW/2, catButtons[i].y + btnH/2);
+    for (int i = 0; i < numCategorias; i++) {
+      int y = topMargin + i*(btnH + 10);
+      catButtons[i] = {20, y, btnW, btnH, categorias[i], TFT_BLUE, TFT_WHITE, TFT_WHITE};
+      tft.fillRect(catButtons[i].x, catButtons[i].y, catButtons[i].w, catButtons[i].h, catButtons[i].colorBg);
+      tft.drawRect(catButtons[i].x, catButtons[i].y, catButtons[i].w, catButtons[i].h, catButtons[i].colorBorder);
+      tft.setTextDatum(MC_DATUM);
+      tft.drawString(catButtons[i].label, catButtons[i].x + btnW/2, catButtons[i].y + btnH/2);
+    }
+    primeiroDesenho = false;
   }
 }
 
 void processarCategoria() {
   if (!ts.touched()) return;
   TS_Point p = ts.getPoint();
-  int x = map(p.x, TS_MINX, TS_MAXX, 0, SCREEN_W);
-  int y = map(p.y, TS_MINY, TS_MAXY, 0, SCREEN_H);
+  int x = map(p.y, TS_MINY, TS_MAXY, 0, SCREEN_W);
+  int y = map(p.x, TS_MINX, TS_MAXX, 0, SCREEN_H);
 
   for (int i=0; i<numCategorias; i++) {
     if (x >= catButtons[i].x && x <= catButtons[i].x + catButtons[i].w &&
@@ -239,12 +240,13 @@ void processarCategoria() {
       telaAtual = CARREGANDO;
       tempoEstado = millis();
       primeiroDesenho = true;
+      pesoMedido = false; 
+      massaPesada = 0;
       break;
     }
   }
 }
 
-// ==================== Criação e desenho dos botões do teclado ====================
 void criarBotoes() {
   int rows = 4;
   int cols = 3;
@@ -267,23 +269,25 @@ void criarBotoes() {
 }
 
 void desenharTeclado() {
-  teclado.createSprite(SCREEN_W, SCREEN_H);
-  teclado.fillSprite(COR_FUNDO_TELA);
+  if (primeiroDesenho) { 
+    teclado.createSprite(SCREEN_W, SCREEN_H);
+    teclado.fillSprite(COR_FUNDO_TELA);
 
-  for (int i = 0; i < 12; i++) {
-    teclado.fillRect(buttons[i].x, buttons[i].y, buttons[i].w, buttons[i].h, buttons[i].colorBg);
-    teclado.drawRect(buttons[i].x, buttons[i].y, buttons[i].w, buttons[i].h, buttons[i].colorBorder);
-    teclado.setTextColor(buttons[i].colorText, buttons[i].colorBg);
-    teclado.setTextDatum(MC_DATUM);
-    teclado.setTextSize(TEXTO_SIZE);
-    teclado.drawString(buttons[i].label, buttons[i].x + buttons[i].w/2, buttons[i].y + buttons[i].h/2);
+    for (int i = 0; i < 12; i++) {
+      teclado.fillRect(buttons[i].x, buttons[i].y, buttons[i].w, buttons[i].h, buttons[i].colorBg);
+      teclado.drawRect(buttons[i].x, buttons[i].y, buttons[i].w, buttons[i].h, buttons[i].colorBorder);
+      teclado.setTextColor(buttons[i].colorText, buttons[i].colorBg);
+      teclado.setTextDatum(MC_DATUM);
+      teclado.setTextSize(TEXTO_SIZE);
+      teclado.drawString(buttons[i].label, buttons[i].x + buttons[i].w/2, buttons[i].y + buttons[i].h/2);
+    }
+    teclado.pushSprite(0,0);
+    primeiroDesenho = false;
   }
-
-  teclado.pushSprite(0,0);
 }
 
 void atualizarCampoTexto() {
-  tft.fillRect(0, 0, SCREEN_W, 60, COR_FUNDO_TELA);
+  tft.fillRect(0, 0, SCREEN_W, 60, COR_FUNDO_TELA); 
   tft.drawRect(10, 10, SCREEN_W-20, 40, TFT_WHITE);
   tft.setTextColor(TFT_WHITE, COR_FUNDO_TELA);
   tft.setTextDatum(ML_DATUM);
@@ -299,7 +303,6 @@ void atualizarCampoTexto() {
   tft.drawString(formatado, 15, 20);
 }
 
-// ==================== VALIDAÇÃO CPF ====================
 bool validarCPF(String cpf) {
   if (cpf.length() != 11) return false;
   bool allEqual = true;
@@ -318,7 +321,7 @@ bool validarCPF(String cpf) {
 }
 
 void mostrarMensagem(bool valido) {
-  tft.fillRect(0, SCREEN_H-50, SCREEN_W, 50, COR_FUNDO_TELA);
+  tft.fillRect(0, SCREEN_H-50, SCREEN_W, 50, COR_FUNDO_TELA); 
   tft.setTextDatum(MC_DATUM);
   tft.setTextSize(TEXTO_SIZE);
 
@@ -333,76 +336,90 @@ void mostrarMensagem(bool valido) {
   }
 }
 
-// ==================== CARREGAMENTO ====================
 void mostrarTelaCarregamento() {
-  if (primeiroDesenho) {
+  int cx = SCREEN_W/2;
+  int cy = SCREEN_H/2;
+  int delayAPI = 5000;
+
+  if (primeiroDesenho) { 
     tft.fillScreen(COR_FUNDO_TELA);
     passoCarregamento = 0;
     primeiroDesenho = false;
-    dadosEnviados = false; // reseta controle
+    dadosEnviados = false;
+    pesoMedido = false;
   }
 
-  int cx = SCREEN_W/2;
-  int cy = SCREEN_H/2;
-
-  tft.fillRect(0, cy-10, SCREEN_W, 30, COR_FUNDO_TELA); // limpa área do texto
-
+  tft.fillRect(0, cy-30, SCREEN_W, 60, COR_FUNDO_TELA); 
   tft.setTextDatum(MC_DATUM);
   tft.setTextSize(2);
   tft.setTextColor(TFT_WHITE, COR_FUNDO_TELA);
 
-  if (millis() - tempoEstado < 3000) {
+  if (!pesoMedido) {
+    tft.setTextSize(3);
+    tft.setTextColor(TFT_WHITE, COR_FUNDO_TELA);
+    tft.drawString("Coloque o item...", cx, cy - 20);
+
+    if (scale.is_ready()) { 
+      float reading = scale.get_units(5); 
+      massaPesada = max(0, (int)round(reading)); 
+      
+      tft.fillRect(0, cy + 5, SCREEN_W, 30, COR_FUNDO_TELA); 
+      tft.setTextSize(3);
+      tft.setTextColor(TFT_YELLOW, COR_FUNDO_TELA);
+      tft.drawString(String(massaPesada) + "g", cx, cy + 20);
+      
+      if (massaPesada > 5) { 
+          pesoMedido = true;
+          tempoEstado = millis();
+      }
+    } else {
+      tft.setTextSize(2);
+      tft.setTextColor(TFT_RED, COR_FUNDO_TELA);
+      tft.drawString("Balança indisponível", cx, cy + 20);
+    }
+  } 
+  else if (millis() - tempoEstado < delayAPI) {
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_WHITE, COR_FUNDO_TELA);
+    
     String dots = "";
     for (int i=0; i<(passoCarregamento%4); i++) dots += ".";
-    tft.drawString("Analisando" + dots, cx, cy);
-    passoCarregamento++;
-  } else if (millis() - tempoEstado < 6000) {
-    String dots = "";
-    for (int i=0; i<(passoCarregamento%4); i++) dots += ".";
-    tft.drawString("Enviando ao servidor" + dots, cx, cy);
+    tft.drawString("Analisando e Enviando" + dots, cx, cy - 20);
+    
+    tft.setTextSize(3);
+    tft.setTextColor(TFT_YELLOW, COR_FUNDO_TELA);
+    tft.drawString(String(massaPesada) + "g", cx, cy + 20);
+    
     passoCarregamento++;
 
-    // Simula envio API uma vez
     if (!dadosEnviados) {
-      int peso = lerPesoCelula();
-      // Aqui você só precisa passar os parâmetros desejados:
-      enviarParaAPI(cpfConfirmado, categoriaSelecionada, peso, idLixeira);
+      enviarParaAPI(cpfConfirmado, categoriaSelecionada, massaPesada, idLixeira);
       dadosEnviados = true;
     }
-  } else {
+  } 
+  else {
+    scale.tare(); 
     telaAtual = MENSAGEM_FINAL;
     tempoEstado = millis();
     primeiroDesenho = true;
-    dadosEnviados = false; // prepara próximo envio
+    dadosEnviados = false;
   }
 }
 
-// ==================== MENSAGEM FINAL ====================
 void mostrarMensagemFinal() {
-  if (primeiroDesenho) {
+  if (primeiroDesenho) { 
     tft.fillScreen(COR_FUNDO_TELA);
-    drawMultilineString("Parabens! Seus e-coins ja estao guardados", 10, SCREEN_H/2 - 20, SCREEN_W - 20, 2, TFT_GREEN);
+    drawMultilineString("Parabens! Seus e-coins (" + String(massaPesada) + "g) ja estao guardados", 10, SCREEN_H/2 - 20, SCREEN_W - 20, 2, TFT_GREEN);
     tempoEstado = millis();
     primeiroDesenho = false;
   }
 
   if (millis() - tempoEstado >= 5000) {
     telaAtual = TECLADO;
-    cpfDigitado = "";
+    cpfDigitado = ""; 
     categoriaSelecionada = "";
+    massaPesada = 0; 
     desenharTeclado();
     atualizarCampoTexto();
-  }
-}
-
-// ==================== LEITURA CELULA DE CARGA ====================
-int lerPesoCelula() {
-  if (balanca.is_ready()) {
-    long leitura = balanca.get_units(5);  // média de 5 leituras
-    if (leitura < 0) leitura = 0;
-    return (int) leitura;  // já em gramas, arredondado para int
-  } else {
-    Serial.println("HX711 não pronto");
-    return 0;
   }
 }
